@@ -124,3 +124,31 @@ p {
   color: #c4b5fd;
   font-size: 0.8rem;
 }
+
+.output {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 200px;
+}
+
+.output svg {
+  flex-shrink: 0;
+}
+
+.output select {
+  min-width: 0;
+  flex: 1;
+  padding: 0.2rem 0.3rem;
+  background-color: #27272a;
+  color: white;
+  border: none;
+  border-radius: 0.4rem;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+}
+
+.volume {
+  width: 200px;
+  justify-content: flex-end;
+}

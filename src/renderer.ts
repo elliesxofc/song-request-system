@@ -3,6 +3,7 @@
 import "./index.css";
 
 type Video = { id: string; title: string };
+type AudioOutputResult = "ok" | "not-found" | "no-player" | "no-media" | "error";
 
 declare global {
   interface Window {
@@ -16,6 +17,10 @@ declare global {
       showNowPlayingFile: () => void;
       getChatStatus: () => Promise<string>;
       onChatStatus: (callback: (text: string) => void) => void;
+      getPlayerSettings: () => Promise<{ volume: number; muted: boolean; audioOutput: string }>;
+      saveVolume: (volume: number, muted: boolean) => void;
+      setAudioOutput: (name: string) => Promise<AudioOutputResult>;
+      applyAudioOutput: () => Promise<AudioOutputResult>;
     };
     onYouTubeIframeAPIReady?: () => void;
   }
@@ -73,6 +78,51 @@ let volume = 100;
 let muted = false;
 let volumeBeforeMute = 100;
 
+// remembered between launches (saved a moment after you stop dragging)
+let saveVolumeTimer: ReturnType<typeof setTimeout> | undefined;
+function saveVolumeSoon() {
+  clearTimeout(saveVolumeTimer);
+  saveVolumeTimer = setTimeout(() => window.electronAPI.saveVolume(volume, muted), 400);
+}
+
+// Sound output (e.g. a virtual cable for OBS). The list comes from this page; YouTube's player
+// is switched by device name in the main process.
+let audioOutput = "";
+async function listAudioOutputs() {
+  const select = document.getElementById("audio-output") as HTMLSelectElement;
+  let all = await navigator.mediaDevices.enumerateDevices();
+  if (all.some((d) => d.kind === "audiooutput" && !d.label)) {
+    // device names are hidden until microphone access is allowed (the app allows it itself);
+    // the microphone is opened and closed straight away, nothing is recorded
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+      all = await navigator.mediaDevices.enumerateDevices();
+    } catch {
+      // no microphone: the list just shows what it can
+    }
+  }
+  const devices = all.filter(
+    // "default" and "communications" are aliases of real devices that are listed anyway
+    (d) => d.kind === "audiooutput" && d.label && d.deviceId !== "default" && d.deviceId !== "communications"
+  );
+  const names = devices.map((d) => d.label);
+  // keep a saved device in the list even while it's unplugged, so the choice isn't lost
+  if (audioOutput && !names.includes(audioOutput)) names.push(audioOutput);
+  select.replaceChildren(
+    new Option("System default", ""),
+    ...names.map((name) => {
+      const connected = devices.some((d) => d.label === name);
+      return new Option(connected ? name : `${name} (not connected)`, name);
+    })
+  );
+  select.value = audioOutput;
+}
+function showAudioOutputResult(result: AudioOutputResult) {
+  if (result === "not-found") showStatus(`"${audioOutput}" isn't connected, so the music is playing on the current output.`);
+  else if (result === "error") showStatus("Couldn't switch the sound output.");
+}
+
 function applyVolume() {
   const slider = document.getElementById("volume") as HTMLInputElement;
   slider.valueAsNumber = muted ? 0 : volume;
@@ -120,6 +170,7 @@ async function playNext() {
           player = event.target;
           showStatus("");
           applyVolume();
+          window.electronAPI.applyAudioOutput().then(showAudioOutputResult);
           player.playVideo();
         },
         onStateChange: async (event) => {
@@ -132,6 +183,7 @@ async function playNext() {
             if (playPauseButton) playPauseButton.innerHTML = PAUSE_ICON;
             // a new video can start at YouTube's own volume, so keep it in line with the slider
             applyVolume();
+            window.electronAPI.applyAudioOutput().then(showAudioOutputResult);
             failuresInARow = 0;
             showStatus("");
           }
@@ -187,6 +239,16 @@ window.electronAPI.onQueueUpdate((queue) => {
   }
 });
 
+// last session's volume and sound output
+window.electronAPI.getPlayerSettings().then((settings) => {
+  volume = settings.volume;
+  muted = settings.muted;
+  volumeBeforeMute = volume || 100;
+  audioOutput = settings.audioOutput;
+  applyVolume();
+  listAudioOutputs();
+});
+
 // whether chat requests are on, and whether the bot can reply
 function showChatStatus(text: string) {
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
@@ -239,6 +301,7 @@ document.addEventListener("DOMContentLoaded", () => {
     muted = volume === 0;
     if (volume > 0) volumeBeforeMute = volume;
     applyVolume();
+    saveVolumeSoon();
   });
 
   document.getElementById("volume-button")?.addEventListener("click", () => {
@@ -250,6 +313,19 @@ document.addEventListener("DOMContentLoaded", () => {
       muted = true;
     }
     applyVolume();
+    saveVolumeSoon();
+  });
+
+  const outputSelect = document.getElementById("audio-output") as HTMLSelectElement;
+  outputSelect.addEventListener("change", async () => {
+    audioOutput = outputSelect.value;
+    showStatus("");
+    showAudioOutputResult(await window.electronAPI.setAudioOutput(audioOutput));
+  });
+  // plugging in or removing a device (or a virtual cable starting) updates the list
+  navigator.mediaDevices.addEventListener("devicechange", async () => {
+    await listAudioOutputs();
+    showAudioOutputResult(await window.electronAPI.applyAudioOutput());
   });
 });
 

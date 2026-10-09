@@ -57,7 +57,30 @@ function saveSongs() {
   writeFileSync(SONGS_FILE, JSON.stringify(songIds));
 }
 
-type Settings = { nowPlayingPath?: string };
+type Settings = {
+  nowPlayingPath?: string;
+  volume?: number;
+  muted?: boolean;
+  // the sound output device, by name: device IDs differ between the app's page and
+  // YouTube's player, but names are the same ("" = system default)
+  audioOutput?: string;
+};
+// Runs inside YouTube's player frame (see applyAudioOutput). Kept as plain text so it runs
+// there exactly as written.
+const ROUTE_AUDIO = `async (name) => {
+  const media = [...document.querySelectorAll("video, audio")];
+  if (!media.length) return "no-media";
+  let sinkId = "";
+  if (name) {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const device = devices.find((d) => d.kind === "audiooutput" && d.label === name);
+    if (!device) return "not-found";
+    sinkId = device.deviceId;
+  }
+  await Promise.all(media.map((m) => (m.sinkId === sinkId ? null : m.setSinkId(sinkId))));
+  return "ok";
+}`;
+
 function readSettings(): Settings {
   try {
     return JSON.parse(readFileSync(SETTINGS_FILE, "utf-8"));
@@ -210,6 +233,45 @@ const createWindow = async () => {
     return result.filePath;
   });
   ipcMain.on("now-playing:show", () => shell.showItemInFolder(nowPlayingPath()));
+
+  ipcMain.handle("player-settings:get", () => {
+    const settings = readSettings();
+    return {
+      volume: settings.volume ?? 100,
+      muted: settings.muted ?? false,
+      audioOutput: settings.audioOutput ?? "",
+    };
+  });
+  ipcMain.on("player-settings:save-volume", (_event, volume: unknown, muted: unknown) => {
+    if (typeof volume !== "number" || volume < 0 || volume > 100 || typeof muted !== "boolean") return;
+    writeSettings({ volume: Math.round(volume), muted });
+  });
+  ipcMain.handle("audio-output:set", (_event, name: unknown) => {
+    if (typeof name !== "string") return "error";
+    writeSettings({ audioOutput: name });
+    return applyAudioOutput();
+  });
+  ipcMain.handle("audio-output:apply", () => applyAudioOutput());
+
+  // The music plays inside YouTube's player, which is its own page (an iframe from
+  // youtube.com), so the app's page can't pick its speakers. The app can run code in that
+  // frame though: find the device by name there and point the player's video at it.
+  async function applyAudioOutput(): Promise<string> {
+    const name = readSettings().audioOutput ?? "";
+    const youtubeFrames = mainWindow.webContents.mainFrame.framesInSubtree.filter((frame) =>
+      /^https:\/\/www\.youtube(-nocookie)?\.com\//.test(frame.url)
+    );
+    if (!youtubeFrames.length) return "no-player";
+    const results: string[] = await Promise.all(
+      youtubeFrames.map((frame) =>
+        frame.executeJavaScript(`(${ROUTE_AUDIO})(${JSON.stringify(name)})`).catch((err) => {
+          console.error("Couldn't switch the sound output:", err);
+          return "error";
+        })
+      )
+    );
+    return results.find((result) => result !== "no-media") ?? "no-media";
+  }
 
   ipcMain.on("show-context-menu", (_event, videoId) => {
     const menu = Menu.buildFromTemplate([
