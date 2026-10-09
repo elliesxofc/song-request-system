@@ -80,3 +80,10 @@ p {
 .song:hover {
   background-color: #2e2e31;
 }
+
+.status {
+  padding: 0.5rem;
+  background-color: #3f1d24;
+  color: #fecdd3;
+  font-size: 0.9rem;
+}

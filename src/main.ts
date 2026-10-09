@@ -3,6 +3,9 @@ import "dotenv/config";
 
 import { app, BrowserWindow, clipboard, ipcMain, Menu, shell } from "electron";
 import { readFileSync, writeFileSync, existsSync, copyFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "path";
 import { Masterchat, stringify } from "masterchat";
 import ms from "ms";
@@ -73,6 +76,49 @@ function parseSongTitle(title: string) {
     .replaceAll("&#39;", "'");
 }
 
+// The YouTube player refuses to run on pages opened from file:// (it can't tell which site
+// it's embedded in: "Error 153 / video player configuration error"), which is how a packaged
+// app loads its page. So in production the page is served from a small local web server,
+// the same way `npm start` serves it from Vite's dev server.
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+  ".json": "application/json",
+};
+
+function serveRenderer(root: string): Promise<string> {
+  const server = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      const relative = decodeURIComponent(url.pathname).replace(/^\/+/, "") || "index.html";
+      const file = path.normalize(path.join(root, relative));
+      if (!file.startsWith(root + path.sep)) {
+        res.writeHead(403).end();
+        return;
+      }
+      const body = await readFile(file);
+      res.writeHead(200, {
+        "Content-Type": MIME_TYPES[path.extname(file)] ?? "application/octet-stream",
+      });
+      res.end(body);
+    } catch {
+      res.writeHead(404).end();
+    }
+  });
+  return new Promise((resolve) => {
+    // 127.0.0.1 only: nothing outside this PC can reach it; port 0 picks a free port
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve(`http://127.0.0.1:${port}/index.html`);
+    });
+  });
+}
+
 const createWindow = async () => {
   const mainWindow = new BrowserWindow({
     width: 800,
@@ -87,8 +133,10 @@ const createWindow = async () => {
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
   } else {
-    mainWindow.loadFile(
-      path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`)
+    mainWindow.loadURL(
+      await serveRenderer(
+        path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}`)
+      )
     );
   }
 

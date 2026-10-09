@@ -8,6 +8,7 @@
 
 <body>
   <div id="player"></div>
+  <p id="status" class="status" role="status" hidden></p>
   <div class="controls">
     <div class="buttons">
       <button id="playpause">
@@ -46,7 +47,7 @@
     <h1>Queue</h1>
     <div id="queue">No songs in queue.</div>
   </div>
-  <script src="https://www.youtube.com/iframe_api"></script>
+  <!-- the YouTube IFrame API is loaded by renderer.ts, which waits until it's ready -->
   <script type="module" src="/src/renderer.ts"></script>
 </body>
 

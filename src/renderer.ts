@@ -2,66 +2,125 @@
 
 import "./index.css";
 
-console.log(
-  '👋 This message is being logged by "renderer.ts", included via Vite',
-);
+type Video = { id: string; title: string };
 
 declare global {
   interface Window {
     electronAPI: {
-      getVideo: () => Promise<{ id: string; title: string }>;
-      onQueueUpdate: (
-        callback: (queue: { id: string; title: string }[]) => void,
-      ) => void;
-      onSongSkipped: (
-        callback: (video: { id: string; title: string }) => void,
-      ) => void;
+      getVideo: () => Promise<Video>;
+      onQueueUpdate: (callback: (queue: Video[]) => void) => void;
+      onSongSkipped: (callback: (video: Video) => void) => void;
       showContextMenu: (videoId: string) => void;
     };
+    onYouTubeIframeAPIReady?: () => void;
   }
 }
 
-let player: YT.Player;
-(async () => {
-  const video = await window.electronAPI.getVideo();
-  updateSongTitle(video);
-  player = new YT.Player("player", {
-    width: "800",
-    height: "300",
-    videoId: video.id,
-    playerVars: {
-      showinfo: 0,
-      controls: 0,
-      autohide: 1,
-      modestbranding: 1,
-      rel: 0,
-    },
-    events: {
-      onReady: () => {
-        player.playVideo();
-      },
-      onStateChange: async (event) => {
-        if (event.data === YT.PlayerState.ENDED) {
-          const newVideo = await window.electronAPI.getVideo();
-          updateSongTitle(newVideo);
-          player.loadVideoById(newVideo.id);
-        } else if (
-          event.data === YT.PlayerState.PAUSED ||
-          event.data === YT.PlayerState.PLAYING
-        ) {
-          const playPauseButton = document.getElementById("playpause");
-          switch (event.data) {
-            case YT.PlayerState.PAUSED:
-              playPauseButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-play"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>`;
-              break;
-            case YT.PlayerState.PLAYING:
-              playPauseButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-pause"><circle cx="12" cy="12" r="10"/><line x1="10" x2="10" y1="15" y2="9"/><line x1="14" x2="14" y1="15" y2="9"/></svg>`;
-              break;
-          }
-        }
-      },
-    },
+const PAUSE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-pause"><circle cx="12" cy="12" r="10"/><line x1="10" x2="10" y1="15" y2="9"/><line x1="14" x2="14" y1="15" y2="9"/></svg>`;
+const PLAY_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-play"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>`;
+
+// YouTube error codes that mean "this video can't be played here": skip to the next song
+// instead of stalling. 2 = bad video id, 5 = HTML5 player error, 100 = removed or private,
+// 101/150 = the owner doesn't allow embedding, 153 = the page didn't identify itself.
+const UNPLAYABLE = new Set([2, 5, 100, 101, 150, 153]);
+
+// The IFrame API script loads asynchronously and calls window.onYouTubeIframeAPIReady when
+// YT.Player can be used. Creating the player before that fails with "YT is not defined".
+function loadYouTubeApi(): Promise<typeof YT> {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  return new Promise((resolve, reject) => {
+    const previous = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      previous?.();
+      resolve(window.YT);
+    };
+    const script = document.createElement("script");
+    script.src = "https://www.youtube.com/iframe_api";
+    script.onerror = () =>
+      reject(new Error("Couldn't load the YouTube player. Check your internet connection."));
+    document.head.appendChild(script);
   });
+}
+
+let player: YT.Player | null = null;
+let skipping = false;
+// if songs keep failing back to back, something bigger is wrong (no internet, YouTube
+// rejecting the app): stop rather than burn through the playlist and the API quota
+let failuresInARow = 0;
+const MAX_FAILURES_IN_A_ROW = 3;
+
+function showStatus(text: string) {
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  const status = document.getElementById("status")!;
+  status.textContent = text;
+  status.hidden = !text;
+}
+
+async function playNext() {
+  if (!player || skipping) return;
+  skipping = true;
+  try {
+    const newVideo = await window.electronAPI.getVideo();
+    updateSongTitle(newVideo);
+    player.loadVideoById(newVideo.id);
+  } finally {
+    skipping = false;
+  }
+}
+
+(async () => {
+  try {
+    const [, video] = await Promise.all([loadYouTubeApi(), window.electronAPI.getVideo()]);
+    updateSongTitle(video);
+    player = new YT.Player("player", {
+      width: "800",
+      height: "300",
+      videoId: video.id,
+      playerVars: {
+        controls: 0,
+        autohide: 1,
+        modestbranding: 1,
+        rel: 0,
+        // lets the player talk back to this page (play state, errors) reliably
+        origin: window.location.origin,
+      },
+      events: {
+        onReady: () => {
+          showStatus("");
+          player?.playVideo();
+        },
+        onStateChange: async (event) => {
+          const playPauseButton = document.getElementById("playpause");
+          if (event.data === YT.PlayerState.ENDED) {
+            await playNext();
+          } else if (event.data === YT.PlayerState.PAUSED) {
+            if (playPauseButton) playPauseButton.innerHTML = PLAY_ICON;
+          } else if (event.data === YT.PlayerState.PLAYING) {
+            if (playPauseButton) playPauseButton.innerHTML = PAUSE_ICON;
+            failuresInARow = 0;
+            showStatus("");
+          }
+        },
+        onError: async (event) => {
+          const title = document.getElementById("currentsong")?.textContent || "this song";
+          if (UNPLAYABLE.has(event.data)) {
+            failuresInARow++;
+            if (failuresInARow >= MAX_FAILURES_IN_A_ROW) {
+              showStatus(`${failuresInARow} songs in a row couldn't play (YouTube error ${event.data}). Press skip to try again.`);
+              failuresInARow = 0;
+              return;
+            }
+            showStatus(`Couldn't play "${title}" (YouTube error ${event.data}), skipping…`);
+            await playNext();
+          } else {
+            showStatus(`YouTube player error ${event.data}`);
+          }
+        },
+      },
+    });
+  } catch (err) {
+    showStatus(err instanceof Error ? err.message : String(err));
+  }
 })();
 
 window.electronAPI.onQueueUpdate((queue) => {
@@ -87,30 +146,28 @@ window.electronAPI.onQueueUpdate((queue) => {
 });
 
 window.electronAPI.onSongSkipped((video) => {
-  player.loadVideoById(video.id);
   updateSongTitle(video);
+  player?.loadVideoById(video.id);
 });
 
 document.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("skip")?.addEventListener("click", async () => {
-    const newVideo = await window.electronAPI.getVideo();
-    updateSongTitle(newVideo);
-    player.loadVideoById(newVideo.id);
-  });
+  document.getElementById("skip")?.addEventListener("click", () => playNext());
 
   const playPauseButton = document.getElementById("playpause");
-  playPauseButton?.addEventListener("click", async () => {
+  playPauseButton?.addEventListener("click", () => {
+    if (!player) return;
     if (player.getPlayerState() === YT.PlayerState.PLAYING) {
       player.pauseVideo();
-      playPauseButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-play"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>`;
+      playPauseButton.innerHTML = PLAY_ICON;
     } else {
       player.playVideo();
-      playPauseButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-pause"><circle cx="12" cy="12" r="10"/><line x1="10" x2="10" y1="15" y2="9"/><line x1="14" x2="14" y1="15" y2="9"/></svg>`;
+      playPauseButton.innerHTML = PAUSE_ICON;
     }
   });
 
   const volumeSlider = document.getElementById("volume") as HTMLInputElement;
   volumeSlider.addEventListener("input", (e) => {
+    if (!player) return;
     const newVolume = (e.target as HTMLInputElement).valueAsNumber;
     if (player.isMuted() && newVolume > 0) player.unMute();
     if (!player.isMuted() && newVolume === 0) player.mute();
@@ -119,6 +176,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const volumeButton = document.getElementById("volume-button");
   volumeButton?.addEventListener("click", () => {
+    if (!player) return;
     volumeSlider.valueAsNumber = !player.isMuted() ? 0 : player.getVolume();
     if (player.isMuted()) {
       player.unMute();
@@ -128,8 +186,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
-function updateSongTitle(video: { id: string; title: string }) {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+function updateSongTitle(video: Video) {
   const currentSong = document.getElementById(
     "currentsong",
   ) as HTMLAnchorElement;
