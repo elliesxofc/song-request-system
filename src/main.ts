@@ -215,7 +215,7 @@ const createWindow = async () => {
         if (Date.now() < cooldown + 10 * 1000) {
           return mc.sendMessage(
             `${message.user.name}, you're on cooldown. Please wait ${ms(
-              cooldown - Date.now(),
+              cooldown + 10 * 1000 - Date.now(),
               { long: true }
             )} before requesting another song.`
           );
@@ -340,7 +340,7 @@ const createWindow = async () => {
         "queue-updated",
         [...queue.entries()].map(([k, v]) => ({ id: k, title: v.title }))
       );
-      if (!chat.isOwner || !chat.isModerator)
+      if (!chat.isOwner && !chat.isModerator)
         cooldowns.set(message.user.id, Date.now());
 
       sendMessage(
@@ -355,9 +355,9 @@ const createWindow = async () => {
         return mc.sendMessage("There are no songs in the queue.");
       sendMessage(
         `Next 3 songs in the queue: ${[...queue.entries()]
+          .slice(0, 3)
           .map(([, { title }], index) => `${index + 1}. ${title}`)
-          .join(", ")
-          .slice(0, 3)}`
+          .join(", ")}`
       );
     } else if (message.content === "!skip") {
       if (!chat.isModerator && !chat.isOwner)
