@@ -28,7 +28,9 @@ const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 // .env next to the project (npm start) wins, then the one in the data folder (installed app)
 loadEnv({ path: [path.resolve(".env"), path.join(DATA_DIR, ".env")] });
 
-const REQUIRED_ENV = ["YOUTUBE_API_KEY", "YOUTUBE_BOT_CREDENTIALS", "YOUTUBE_STREAM_ID"];
+// Only the API key is needed (song titles and search). YOUTUBE_STREAM_ID turns on chat
+// requests, and YOUTUBE_BOT_CREDENTIALS lets the bot reply in chat: both are optional.
+const REQUIRED_ENV = ["YOUTUBE_API_KEY"];
 const missingEnv = REQUIRED_ENV.filter((name) => !process.env[name]);
 if (missingEnv.length) {
   const message = `Missing settings: ${missingEnv.join(", ")}.\n\nPut them in a .env file in:\n${DATA_DIR}`;
@@ -245,202 +247,233 @@ const createWindow = async () => {
     menu.popup();
   });
 
-  const mc = await Masterchat.init(process.env.YOUTUBE_STREAM_ID!, {
-    credentials: process.env.YOUTUBE_BOT_CREDENTIALS!,
+  // Chat requests. Reading chat needs no login, so a bot account is only needed for the
+  // bot to answer in chat; without one, requests still work and the bot stays quiet.
+  let chatStatus = "";
+  function setChatStatus(text: string) {
+    chatStatus = text;
+    mainWindow.webContents.send("chat-status", text);
+  }
+  ipcMain.handle("chat:status", () => chatStatus);
+
+  startChat().catch((err) => {
+    console.error(err);
+    setChatStatus(
+      `Couldn't connect to the stream chat (${err instanceof Error ? err.message : err}). Song requests are off; the playlist still plays.`
+    );
   });
 
-  function sendMessage(content: string) {
-    if (content.length === 0) return;
-    if (content.length > 200) {
-      const messages = [];
-      while (content.length > 200) {
-        messages.push(content.substring(0, 200));
-        content = content.substring(200);
-      }
-      for (const message of messages) {
-        mc.sendMessage(message);
-      }
-    } else {
-      mc.sendMessage(content);
+  async function startChat() {
+    const streamId = process.env.YOUTUBE_STREAM_ID;
+    const botCredentials = process.env.YOUTUBE_BOT_CREDENTIALS;
+    if (!streamId) {
+      setChatStatus("No stream set (YOUTUBE_STREAM_ID), so song requests are off. The playlist still plays.");
+      return;
     }
-  }
+    const mc = await Masterchat.init(streamId, botCredentials ? { credentials: botCredentials } : {});
+    setChatStatus(
+      botCredentials ? "" : "Song requests are on. No bot account is set, so the bot won't reply in chat."
+    );
 
-  mc.on("chat", async (chat) => {
-    const message = {
-      content: stringify(chat.message),
-      user: {
-        id: chat.authorChannelId,
-        name: chat.authorName,
-        avatar: chat.authorPhoto,
-      },
-    };
-    if (message.content.startsWith("!sr")) {
-      const cooldown = cooldowns.get(message.user.id);
-      if (cooldown) {
-        if (Date.now() < cooldown + 10 * 1000) {
-          return mc.sendMessage(
-            `${message.user.name}, you're on cooldown. Please wait ${ms(
-              cooldown + 10 * 1000 - Date.now(),
-              { long: true }
-            )} before requesting another song.`
-          );
-        }
+    function sendMessage(content: string) {
+      if (content.length === 0) return;
+      if (!botCredentials) {
+        console.log("[bot reply not sent, no bot account]", content);
+        return;
       }
-
-      const searchQuery = message.content.split(" ").slice(1).join(" ");
-
-      let videoId: string;
-      let title: string;
-
-      if (searchQuery.includes("youtu.be/")) {
-        videoId = searchQuery.split("youtu.be/")[1];
-
-        const res = await fetch(
-          `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${process.env.YOUTUBE_API_KEY}`
-        );
-        const data = await res.json();
-        if (!data.items[0])
-          return mc.sendMessage(
-            `${message.user.name}, I couldn't find a video with that search query.`
-          );
-        title = parseSongTitle(data.items[0].snippet.title);
-
-        if (!songIds.includes(videoId)) {
-          if (trustedChannels.includes(data.items[0].snippet.channelId)) {
-            songIds.push(videoId);
-            saveSongs();
-          } else
-            return mc.sendMessage(
-              `${message.user.name}, you can only request songs that are from the playlist.`
-            );
+      if (content.length > 200) {
+        const messages = [];
+        while (content.length > 200) {
+          messages.push(content.substring(0, 200));
+          content = content.substring(200);
         }
-      } else if (searchQuery.includes("youtube.com/watch?v=")) {
-        videoId = searchQuery.split("youtube.com/watch?v=")[1].split("&")[0];
-
-        const res = await fetch(
-          `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${process.env.YOUTUBE_API_KEY}`
-        );
-        const data = await res.json();
-        if (!data.items[0])
-          return mc.sendMessage(
-            `${message.user.name}, I couldn't find a video with that search query.`
-          );
-        title = parseSongTitle(data.items[0].snippet.title);
-
-        if (!songIds.includes(videoId)) {
-          if (trustedChannels.includes(data.items[0].snippet.channelId)) {
-            songIds.push(videoId);
-            saveSongs();
-          } else
-            return mc.sendMessage(
-              `${message.user.name}, you can only request songs that are from the playlist.`
-            );
-        }
-      } else if (!searchQuery.includes(" ") && searchQuery.length >= 11) {
-        videoId = searchQuery;
-
-        const res = await fetch(
-          `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${process.env.YOUTUBE_API_KEY}`
-        );
-        const data = await res.json();
-        if (!data.items[0])
-          return mc.sendMessage(
-            `${message.user.name}, I couldn't find a video with that search query.`
-          );
-        title = parseSongTitle(data.items[0].snippet.title);
-
-        if (!songIds.includes(videoId)) {
-          if (trustedChannels.includes(data.items[0].snippet.channelId)) {
-            songIds.push(videoId);
-            saveSongs();
-          } else
-            return mc.sendMessage(
-              `${message.user.name}, you can only request songs that are from the playlist.`
-            );
+        // the last part (under 200 characters) used to be left out
+        messages.push(content);
+        for (const message of messages) {
+          mc.sendMessage(message).catch(console.error);
         }
       } else {
-        const res = await fetch(
-          `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(
-            searchQuery
-          )}&maxResults=5&type=video&key=${process.env.YOUTUBE_API_KEY}`
-        );
-        const data = await res.json();
-        if (!data.items?.length)
-          return mc.sendMessage(
-            `${message.user.name}, I couldn't find a video with that search query.`
-          );
+        mc.sendMessage(content).catch(console.error);
+      }
+    }
 
-        const video = data.items[0];
-        videoId = video.id.videoId;
-        title = parseSongTitle(video.snippet.title);
-        if (!songIds.includes(videoId)) {
-          if (trustedChannels.includes(video.snippet.channelId)) {
-            songIds.push(videoId);
-            saveSongs();
-          } else {
-            let foundVideo = false;
-            for (let i = 1; i < 5; i++) {
-              const video = data.items[i];
-              if (songIds.includes(video.id.videoId)) {
-                videoId = video.id.videoId;
-                title = parseSongTitle(video.snippet.title);
-                foundVideo = true;
-              }
-            }
-            if (!foundVideo)
-              return mc.sendMessage(
+    mc.on("chat", async (chat) => {
+      const message = {
+        content: stringify(chat.message),
+        user: {
+          id: chat.authorChannelId,
+          name: chat.authorName,
+          avatar: chat.authorPhoto,
+        },
+      };
+      if (message.content.startsWith("!sr")) {
+        const cooldown = cooldowns.get(message.user.id);
+        if (cooldown) {
+          if (Date.now() < cooldown + 10 * 1000) {
+            return sendMessage(
+              `${message.user.name}, you're on cooldown. Please wait ${ms(
+                cooldown + 10 * 1000 - Date.now(),
+                { long: true }
+              )} before requesting another song.`
+            );
+          }
+        }
+
+        const searchQuery = message.content.split(" ").slice(1).join(" ");
+
+        let videoId: string;
+        let title: string;
+
+        if (searchQuery.includes("youtu.be/")) {
+          videoId = searchQuery.split("youtu.be/")[1];
+
+          const res = await fetch(
+            `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${process.env.YOUTUBE_API_KEY}`
+          );
+          const data = await res.json();
+          if (!data.items[0])
+            return sendMessage(
+              `${message.user.name}, I couldn't find a video with that search query.`
+            );
+          title = parseSongTitle(data.items[0].snippet.title);
+
+          if (!songIds.includes(videoId)) {
+            if (trustedChannels.includes(data.items[0].snippet.channelId)) {
+              songIds.push(videoId);
+              saveSongs();
+            } else
+              return sendMessage(
                 `${message.user.name}, you can only request songs that are from the playlist.`
               );
           }
+        } else if (searchQuery.includes("youtube.com/watch?v=")) {
+          videoId = searchQuery.split("youtube.com/watch?v=")[1].split("&")[0];
+
+          const res = await fetch(
+            `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${process.env.YOUTUBE_API_KEY}`
+          );
+          const data = await res.json();
+          if (!data.items[0])
+            return sendMessage(
+              `${message.user.name}, I couldn't find a video with that search query.`
+            );
+          title = parseSongTitle(data.items[0].snippet.title);
+
+          if (!songIds.includes(videoId)) {
+            if (trustedChannels.includes(data.items[0].snippet.channelId)) {
+              songIds.push(videoId);
+              saveSongs();
+            } else
+              return sendMessage(
+                `${message.user.name}, you can only request songs that are from the playlist.`
+              );
+          }
+        } else if (!searchQuery.includes(" ") && searchQuery.length >= 11) {
+          videoId = searchQuery;
+
+          const res = await fetch(
+            `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${process.env.YOUTUBE_API_KEY}`
+          );
+          const data = await res.json();
+          if (!data.items[0])
+            return sendMessage(
+              `${message.user.name}, I couldn't find a video with that search query.`
+            );
+          title = parseSongTitle(data.items[0].snippet.title);
+
+          if (!songIds.includes(videoId)) {
+            if (trustedChannels.includes(data.items[0].snippet.channelId)) {
+              songIds.push(videoId);
+              saveSongs();
+            } else
+              return sendMessage(
+                `${message.user.name}, you can only request songs that are from the playlist.`
+              );
+          }
+        } else {
+          const res = await fetch(
+            `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(
+              searchQuery
+            )}&maxResults=5&type=video&key=${process.env.YOUTUBE_API_KEY}`
+          );
+          const data = await res.json();
+          if (!data.items?.length)
+            return sendMessage(
+              `${message.user.name}, I couldn't find a video with that search query.`
+            );
+
+          const video = data.items[0];
+          videoId = video.id.videoId;
+          title = parseSongTitle(video.snippet.title);
+          if (!songIds.includes(videoId)) {
+            if (trustedChannels.includes(video.snippet.channelId)) {
+              songIds.push(videoId);
+              saveSongs();
+            } else {
+              let foundVideo = false;
+              for (let i = 1; i < 5; i++) {
+                const video = data.items[i];
+                if (songIds.includes(video.id.videoId)) {
+                  videoId = video.id.videoId;
+                  title = parseSongTitle(video.snippet.title);
+                  foundVideo = true;
+                }
+              }
+              if (!foundVideo)
+                return sendMessage(
+                  `${message.user.name}, you can only request songs that are from the playlist.`
+                );
+            }
+          }
         }
+
+        if (queue.has(videoId))
+          return sendMessage(
+            `${message.user.name}, ${title} is already in the queue.`
+          );
+
+        queue.set(videoId, { title });
+        mainWindow.webContents.send(
+          "queue-updated",
+          [...queue.entries()].map(([k, v]) => ({ id: k, title: v.title }))
+        );
+        if (!chat.isOwner && !chat.isModerator)
+          cooldowns.set(message.user.id, Date.now());
+
+        sendMessage(
+          `${message.user.name}, ${title} has been added to the queue.`
+        );
+      } else if (message.content === "!currentsong") {
+        sendMessage(
+          `Currently playing: ${currentSong?.title} (https://youtu.be/${currentSong?.id})`
+        );
+      } else if (message.content === "!queue") {
+        if (!queue.size)
+          return sendMessage("There are no songs in the queue.");
+        sendMessage(
+          `Next 3 songs in the queue: ${[...queue.entries()]
+            .slice(0, 3)
+            .map(([, { title }], index) => `${index + 1}. ${title}`)
+            .join(", ")}`
+        );
+      } else if (message.content === "!skip") {
+        if (!chat.isModerator && !chat.isOwner)
+          return sendMessage(
+            `${message.user.name}, you are not authorized to skip songs.`
+          );
+        sendMessage(`${message.user.name}, skipped ${currentSong?.title}.`);
+        const nextSong = await getNextSong();
+        mainWindow.webContents.send("song-skipped", nextSong);
       }
+    });
 
-      if (queue.has(videoId))
-        return sendMessage(
-          `${message.user.name}, ${title} is already in the queue.`
-        );
+    mc.on("error", (err) => {
+      console.error(err);
+      mc.listen({ ignoreFirstResponse: true });
+    });
 
-      queue.set(videoId, { title });
-      mainWindow.webContents.send(
-        "queue-updated",
-        [...queue.entries()].map(([k, v]) => ({ id: k, title: v.title }))
-      );
-      if (!chat.isOwner && !chat.isModerator)
-        cooldowns.set(message.user.id, Date.now());
-
-      sendMessage(
-        `${message.user.name}, ${title} has been added to the queue.`
-      );
-    } else if (message.content === "!currentsong") {
-      sendMessage(
-        `Currently playing: ${currentSong?.title} (https://youtu.be/${currentSong?.id})`
-      );
-    } else if (message.content === "!queue") {
-      if (!queue.size)
-        return mc.sendMessage("There are no songs in the queue.");
-      sendMessage(
-        `Next 3 songs in the queue: ${[...queue.entries()]
-          .slice(0, 3)
-          .map(([, { title }], index) => `${index + 1}. ${title}`)
-          .join(", ")}`
-      );
-    } else if (message.content === "!skip") {
-      if (!chat.isModerator && !chat.isOwner)
-        return mc.sendMessage(
-          `${message.user.name}, you are not authorized to skip songs.`
-        );
-      sendMessage(`${message.user.name}, skipped ${currentSong?.title}.`);
-      const nextSong = await getNextSong();
-      mainWindow.webContents.send("song-skipped", nextSong);
-    }
-  });
-
-  mc.on("error", (err) => {
-    console.error(err);
     mc.listen({ ignoreFirstResponse: true });
-  });
-
-  mc.listen({ ignoreFirstResponse: true });
+  }
 
   async function getNextSong() {
     let videoId: string;

@@ -14,6 +14,8 @@ declare global {
       getNowPlayingPath: () => Promise<string>;
       chooseNowPlayingPath: () => Promise<string>;
       showNowPlayingFile: () => void;
+      getChatStatus: () => Promise<string>;
+      onChatStatus: (callback: (text: string) => void) => void;
     };
     onYouTubeIframeAPIReady?: () => void;
   }
@@ -122,7 +124,14 @@ async function playNext() {
       },
     });
   } catch (err) {
-    showStatus(err instanceof Error ? err.message : String(err));
+    const message = (err instanceof Error ? err.message : String(err))
+      // Electron wraps errors from the app: "Error invoking remote method 'yt:get-video': …"
+      .replace(/^Error invoking remote method '[^']+': /, "");
+    showStatus(
+      message.includes("fetch failed")
+        ? "Couldn't reach YouTube to get a song. Check your internet connection, then restart the app."
+        : message
+    );
   }
 })();
 
@@ -147,6 +156,16 @@ window.electronAPI.onQueueUpdate((queue) => {
     }
   }
 });
+
+// whether chat requests are on, and whether the bot can reply
+function showChatStatus(text: string) {
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  const chatStatus = document.getElementById("chat-status")!;
+  chatStatus.textContent = text;
+  chatStatus.hidden = !text;
+}
+window.electronAPI.getChatStatus().then(showChatStatus);
+window.electronAPI.onChatStatus(showChatStatus);
 
 window.electronAPI.onSongSkipped((video) => {
   updateSongTitle(video);

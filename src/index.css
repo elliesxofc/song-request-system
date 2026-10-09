@@ -117,3 +117,10 @@ p {
 .now-playing-file button:hover {
   background-color: #3f3f46;
 }
+
+.chat-status {
+  padding: 0.4rem 1rem;
+  background-color: #1e1b2e;
+  color: #c4b5fd;
+  font-size: 0.8rem;
+}

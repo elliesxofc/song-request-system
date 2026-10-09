@@ -14,4 +14,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getNowPlayingPath: () => ipcRenderer.invoke("now-playing:get"),
   chooseNowPlayingPath: () => ipcRenderer.invoke("now-playing:choose"),
   showNowPlayingFile: () => ipcRenderer.send("now-playing:show"),
+  getChatStatus: () => ipcRenderer.invoke("chat:status"),
+  onChatStatus: (callback: (text: string) => void) =>
+    ipcRenderer.on("chat-status", (_event, text) => callback(text)),
 });
