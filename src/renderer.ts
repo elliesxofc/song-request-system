@@ -11,6 +11,9 @@ declare global {
       onQueueUpdate: (callback: (queue: Video[]) => void) => void;
       onSongSkipped: (callback: (video: Video) => void) => void;
       showContextMenu: (videoId: string) => void;
+      getNowPlayingPath: () => Promise<string>;
+      chooseNowPlayingPath: () => Promise<string>;
+      showNowPlayingFile: () => void;
     };
     onYouTubeIframeAPIReady?: () => void;
   }
@@ -151,6 +154,21 @@ window.electronAPI.onSongSkipped((video) => {
 });
 
 document.addEventListener("DOMContentLoaded", () => {
+  // where the song name for OBS is saved
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  const nowPlayingPath = document.getElementById("now-playing-path")!;
+  const showNowPlayingPath = (file: string) => {
+    nowPlayingPath.textContent = file;
+    nowPlayingPath.title = file;
+  };
+  window.electronAPI.getNowPlayingPath().then(showNowPlayingPath);
+  document.getElementById("now-playing-change")?.addEventListener("click", async () => {
+    showNowPlayingPath(await window.electronAPI.chooseNowPlayingPath());
+  });
+  document
+    .getElementById("now-playing-show")
+    ?.addEventListener("click", () => window.electronAPI.showNowPlayingFile());
+
   document.getElementById("skip")?.addEventListener("click", () => playNext());
 
   const playPauseButton = document.getElementById("playpause");

@@ -11,4 +11,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("song-skipped", (_event, videoId) => callback(videoId)),
   showContextMenu: (videoId: string) =>
     ipcRenderer.send("show-context-menu", videoId),
+  getNowPlayingPath: () => ipcRenderer.invoke("now-playing:get"),
+  chooseNowPlayingPath: () => ipcRenderer.invoke("now-playing:choose"),
+  showNowPlayingFile: () => ipcRenderer.send("now-playing:show"),
 });

@@ -29,3 +29,8 @@ declare module 'vite' {
     forgeConfigSelf: VitePluginConfig[K][number];
   }
 }
+
+declare module "electron-squirrel-startup" {
+  const started: boolean;
+  export default started;
+}

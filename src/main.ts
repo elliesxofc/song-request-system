@@ -1,35 +1,86 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-import "dotenv/config";
+import { config as loadEnv } from "dotenv";
 
-import { app, BrowserWindow, clipboard, ipcMain, Menu, shell } from "electron";
-import { readFileSync, writeFileSync, existsSync, copyFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "path";
 import { Masterchat, stringify } from "masterchat";
 import ms from "ms";
+import squirrelStartup from "electron-squirrel-startup";
+import exampleSongs from "../songs.example.json";
 
-if (require("electron-squirrel-startup")) {
+// the Windows installer runs the app briefly while installing to make shortcuts
+if (squirrelStartup) {
   app.quit();
 }
 
-if (
-  !process.env.YOUTUBE_API_KEY ||
-  !process.env.YOUTUBE_BOT_CREDENTIALS ||
-  !process.env.YOUTUBE_STREAM_ID
-) {
-  console.error(
-    "You need to set the following environment variables: YOUTUBE_API_KEY, YOUTUBE_BOT_CREDENTIALS, YOUTUBE_STREAM_ID"
-  );
+// Everything the app saves (playlist, settings, .env) lives in one fixed folder, so it works
+// the same whether it's started with `npm start` or installed, wherever it's launched from.
+// Windows: %APPDATA%\custom-sr-system
+const DATA_DIR = app.getPath("userData");
+mkdirSync(DATA_DIR, { recursive: true });
+const SONGS_FILE = path.join(DATA_DIR, "songs.json");
+const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
+
+// .env next to the project (npm start) wins, then the one in the data folder (installed app)
+loadEnv({ path: [path.resolve(".env"), path.join(DATA_DIR, ".env")] });
+
+const REQUIRED_ENV = ["YOUTUBE_API_KEY", "YOUTUBE_BOT_CREDENTIALS", "YOUTUBE_STREAM_ID"];
+const missingEnv = REQUIRED_ENV.filter((name) => !process.env[name]);
+if (missingEnv.length) {
+  const message = `Missing settings: ${missingEnv.join(", ")}.\n\nPut them in a .env file in:\n${DATA_DIR}`;
+  console.error(message);
+  // an installed app has no console, so say it in a window and open the folder
+  dialog.showErrorBox("Song Requests can't start", message);
+  shell.openPath(DATA_DIR);
   process.exit(1);
 }
 
-if (!existsSync("songs.json")) {
-  copyFileSync("songs.example.json", "songs.json");
+// First run: bring over the playlist from the project folder if there is one,
+// otherwise start from the example playlist built into the app.
+if (!existsSync(SONGS_FILE)) {
+  const oldSongs = path.resolve("songs.json");
+  writeFileSync(
+    SONGS_FILE,
+    existsSync(oldSongs) ? readFileSync(oldSongs, "utf-8") : JSON.stringify(exampleSongs)
+  );
 }
 
-const songIds = JSON.parse(readFileSync("songs.json", "utf-8"));
+const songIds = JSON.parse(readFileSync(SONGS_FILE, "utf-8"));
+
+function saveSongs() {
+  writeFileSync(SONGS_FILE, JSON.stringify(songIds));
+}
+
+type Settings = { nowPlayingPath?: string };
+function readSettings(): Settings {
+  try {
+    return JSON.parse(readFileSync(SETTINGS_FILE, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+function writeSettings(patch: Settings) {
+  writeFileSync(SETTINGS_FILE, JSON.stringify({ ...readSettings(), ...patch }, null, 2));
+}
+
+// The song title for OBS (Text source → "Read from file"). Saved in Documents until
+// you pick another place in the app; the choice is remembered.
+function nowPlayingPath() {
+  return readSettings().nowPlayingPath || path.join(app.getPath("documents"), "current-song.txt");
+}
+async function writeNowPlaying() {
+  if (!currentSong) return;
+  try {
+    await writeFile(nowPlayingPath(), parseSongTitle(currentSong.title) + " ", "utf8");
+  } catch (err) {
+    // a missing drive or read-only folder shouldn't stop the music
+    console.error("Couldn't write the now playing file:", err);
+  }
+}
 
 let currentSong: {
   id: string;
@@ -144,6 +195,20 @@ const createWindow = async () => {
     return await getNextSong();
   });
 
+  ipcMain.handle("now-playing:get", () => nowPlayingPath());
+  ipcMain.handle("now-playing:choose", async () => {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: "Where should the song name for OBS be saved?",
+      defaultPath: nowPlayingPath(),
+      filters: [{ name: "Text file", extensions: ["txt"] }],
+    });
+    if (result.canceled || !result.filePath) return nowPlayingPath();
+    writeSettings({ nowPlayingPath: result.filePath });
+    await writeNowPlaying();
+    return result.filePath;
+  });
+  ipcMain.on("now-playing:show", () => shell.showItemInFolder(nowPlayingPath()));
+
   ipcMain.on("show-context-menu", (_event, videoId) => {
     const menu = Menu.buildFromTemplate([
       {
@@ -243,7 +308,7 @@ const createWindow = async () => {
         if (!songIds.includes(videoId)) {
           if (trustedChannels.includes(data.items[0].snippet.channelId)) {
             songIds.push(videoId);
-            writeFileSync("songs.json", JSON.stringify(songIds));
+            saveSongs();
           } else
             return mc.sendMessage(
               `${message.user.name}, you can only request songs that are from the playlist.`
@@ -265,7 +330,7 @@ const createWindow = async () => {
         if (!songIds.includes(videoId)) {
           if (trustedChannels.includes(data.items[0].snippet.channelId)) {
             songIds.push(videoId);
-            writeFileSync("songs.json", JSON.stringify(songIds));
+            saveSongs();
           } else
             return mc.sendMessage(
               `${message.user.name}, you can only request songs that are from the playlist.`
@@ -287,7 +352,7 @@ const createWindow = async () => {
         if (!songIds.includes(videoId)) {
           if (trustedChannels.includes(data.items[0].snippet.channelId)) {
             songIds.push(videoId);
-            writeFileSync("songs.json", JSON.stringify(songIds));
+            saveSongs();
           } else
             return mc.sendMessage(
               `${message.user.name}, you can only request songs that are from the playlist.`
@@ -311,7 +376,7 @@ const createWindow = async () => {
         if (!songIds.includes(videoId)) {
           if (trustedChannels.includes(video.snippet.channelId)) {
             songIds.push(videoId);
-            writeFileSync("songs.json", JSON.stringify(songIds));
+            saveSongs();
           } else {
             let foundVideo = false;
             for (let i = 1; i < 5; i++) {
@@ -395,7 +460,7 @@ const createWindow = async () => {
       while (title === null) {
         if (queue.has(videoId)) queue.delete(videoId);
         songIds.splice(songIds.indexOf(videoId), 1);
-        writeFileSync("songs.json", JSON.stringify(songIds));
+        saveSongs();
         videoId = getRandomSong();
         title = await getSongTitle(videoId);
       }
@@ -408,7 +473,7 @@ const createWindow = async () => {
   function updateSong(video: { id: string; title: string }) {
     currentSong = video;
     previousSongId = currentSong?.id ?? video.id;
-    writeFileSync("current-song.txt", parseSongTitle(video.title) + " ");
+    writeNowPlaying();
     cooldowns.clear();
   }
 

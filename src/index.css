@@ -87,3 +87,33 @@ p {
   color: #fecdd3;
   font-size: 0.9rem;
 }
+
+.now-playing-file {
+  margin-top: 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: #a1a1aa;
+}
+
+.now-playing-file > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.now-playing-file button {
+  flex-shrink: 0;
+  padding: 0.15rem 0.6rem;
+  background-color: #27272a;
+  color: white;
+  border: none;
+  border-radius: 0.4rem;
+  cursor: pointer;
+}
+
+.now-playing-file button:hover {
+  background-color: #3f3f46;
+}
