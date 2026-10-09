@@ -24,6 +24,10 @@ declare global {
 const PAUSE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-pause"><circle cx="12" cy="12" r="10"/><line x1="10" x2="10" y1="15" y2="9"/><line x1="14" x2="14" y1="15" y2="9"/></svg>`;
 const PLAY_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-play"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>`;
 
+const VOLUME_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-volume-2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+const VOLUME_LOW_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-volume-1"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`;
+const MUTED_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-volume-x"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/></svg>`;
+
 // YouTube error codes that mean "this video can't be played here": skip to the next song
 // instead of stalling. 2 = bad video id, 5 = HTML5 player error, 100 = removed or private,
 // 101/150 = the owner doesn't allow embedding, 153 = the page didn't identify itself.
@@ -47,6 +51,8 @@ function loadYouTubeApi(): Promise<typeof YT> {
   });
 }
 
+// only set once YouTube says the player is ready: before that it has no volume, play or
+// pause controls yet, and calling them throws
 let player: YT.Player | null = null;
 let skipping = false;
 // if songs keep failing back to back, something bigger is wrong (no internet, YouTube
@@ -59,6 +65,26 @@ function showStatus(text: string) {
   const status = document.getElementById("status")!;
   status.textContent = text;
   status.hidden = !text;
+}
+
+// Volume and mute are kept here instead of being read back from the player: YouTube only
+// reports a change back a moment later, so reading it right after a change gets the old value.
+let volume = 100;
+let muted = false;
+let volumeBeforeMute = 100;
+
+function applyVolume() {
+  const slider = document.getElementById("volume") as HTMLInputElement;
+  slider.valueAsNumber = muted ? 0 : volume;
+  const button = document.getElementById("volume-button");
+  if (button) {
+    button.innerHTML = muted || volume === 0 ? MUTED_ICON : volume < 50 ? VOLUME_LOW_ICON : VOLUME_ICON;
+    button.title = muted ? "Unmute" : "Mute";
+  }
+  if (!player) return; // applied again once the player is ready
+  player.setVolume(volume);
+  if (muted || volume === 0) player.mute();
+  else player.unMute();
 }
 
 async function playNext() {
@@ -77,7 +103,7 @@ async function playNext() {
   try {
     const [, video] = await Promise.all([loadYouTubeApi(), window.electronAPI.getVideo()]);
     updateSongTitle(video);
-    player = new YT.Player("player", {
+    new YT.Player("player", {
       width: "800",
       height: "300",
       videoId: video.id,
@@ -90,9 +116,11 @@ async function playNext() {
         origin: window.location.origin,
       },
       events: {
-        onReady: () => {
+        onReady: (event) => {
+          player = event.target;
           showStatus("");
-          player?.playVideo();
+          applyVolume();
+          player.playVideo();
         },
         onStateChange: async (event) => {
           const playPauseButton = document.getElementById("playpause");
@@ -102,6 +130,8 @@ async function playNext() {
             if (playPauseButton) playPauseButton.innerHTML = PLAY_ICON;
           } else if (event.data === YT.PlayerState.PLAYING) {
             if (playPauseButton) playPauseButton.innerHTML = PAUSE_ICON;
+            // a new video can start at YouTube's own volume, so keep it in line with the slider
+            applyVolume();
             failuresInARow = 0;
             showStatus("");
           }
@@ -203,23 +233,23 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   const volumeSlider = document.getElementById("volume") as HTMLInputElement;
-  volumeSlider.addEventListener("input", (e) => {
-    if (!player) return;
-    const newVolume = (e.target as HTMLInputElement).valueAsNumber;
-    if (player.isMuted() && newVolume > 0) player.unMute();
-    if (!player.isMuted() && newVolume === 0) player.mute();
-    player.setVolume(newVolume);
+  volumeSlider.addEventListener("input", () => {
+    volume = volumeSlider.valueAsNumber;
+    // dragging the slider is how you'd expect to unmute, and dragging it to 0 mutes
+    muted = volume === 0;
+    if (volume > 0) volumeBeforeMute = volume;
+    applyVolume();
   });
 
-  const volumeButton = document.getElementById("volume-button");
-  volumeButton?.addEventListener("click", () => {
-    if (!player) return;
-    volumeSlider.valueAsNumber = !player.isMuted() ? 0 : player.getVolume();
-    if (player.isMuted()) {
-      player.unMute();
+  document.getElementById("volume-button")?.addEventListener("click", () => {
+    if (muted || volume === 0) {
+      muted = false;
+      if (volume === 0) volume = volumeBeforeMute || 50;
     } else {
-      player.mute();
+      volumeBeforeMute = volume;
+      muted = true;
     }
+    applyVolume();
   });
 });
 
