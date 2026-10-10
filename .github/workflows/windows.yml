@@ -1,0 +1,25 @@
+# Builds the Windows installer (song-requests-setup.exe) whenever this branch or main
+# changes. Download it from the run's page on the Actions tab, under Artifacts.
+name: windows installer
+
+on:
+  push:
+    branches: [main, fix/youtube-iframe-api]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # the repo's lockfile is bun's, so npm resolves the versions from package.json
+      - run: npm install
+      - run: npx electron-forge make --platform win32 --arch x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: song-requests-windows
+          path: out/make/squirrel.windows/x64/*.exe
+          if-no-files-found: error
