@@ -7,7 +7,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "path";
-import { Masterchat, stringify } from "masterchat";
+import { Masterchat, stringify, type Credentials } from "masterchat";
 import ms from "ms";
 import squirrelStartup from "electron-squirrel-startup";
 import exampleSongs from "../songs.example.json";
@@ -65,6 +65,26 @@ type Settings = {
   // YouTube's player, but names are the same ("" = system default)
   audioOutput?: string;
 };
+// YOUTUBE_BOT_CREDENTIALS is the bot account's YouTube cookies as base64-encoded JSON. Be
+// forgiving about how it was pasted: quotes around it, line breaks from copying out of a
+// terminal, or the JSON itself instead of the encoded version.
+const COOKIE_NAMES = ["SAPISID", "APISID", "HSID", "SID", "SSID"] as const;
+function parseBotCredentials(raw: string): Credentials {
+  const text = raw.trim().replace(/^(["'])([\s\S]*)\1$/, "$2").trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(
+      text.startsWith("{") ? text : Buffer.from(text.replace(/\s+/g, ""), "base64").toString("utf8")
+    );
+  } catch {
+    throw new Error("it isn't the encoded line PowerShell printed, or it was cut off when copying");
+  }
+  const cookies = parsed as Record<string, unknown>;
+  const missing = COOKIE_NAMES.filter((name) => typeof cookies?.[name] !== "string" || !cookies[name]);
+  if (missing.length) throw new Error(`missing ${missing.join(", ")}`);
+  return cookies as unknown as Credentials;
+}
+
 // Runs inside YouTube's player frame (see applyAudioOutput). Kept as plain text so it runs
 // there exactly as written.
 const ROUTE_AUDIO = `async (name) => {
@@ -199,6 +219,10 @@ const createWindow = async () => {
   const mainWindow = new BrowserWindow({
     width: 800,
     height: 600,
+    // 800x600 is the page itself, not counting the title bar (the player is 800 wide)
+    useContentSize: true,
+    // the File/Edit/View menu took room from the page; Alt still shows it
+    autoHideMenuBar: true,
     maximizable: false,
     resizable: false,
     webPreferences: {
@@ -327,14 +351,27 @@ const createWindow = async () => {
 
   async function startChat() {
     const streamId = process.env.YOUTUBE_STREAM_ID;
-    const botCredentials = process.env.YOUTUBE_BOT_CREDENTIALS;
     if (!streamId) {
       setChatStatus("No stream set (YOUTUBE_STREAM_ID), so song requests are off. The playlist still plays.");
       return;
     }
-    const mc = await Masterchat.init(streamId, botCredentials ? { credentials: botCredentials } : {});
+    // a bad bot login shouldn't turn requests off: read chat without it instead
+    let botCredentials: Credentials | undefined;
+    let botProblem = "";
+    if (process.env.YOUTUBE_BOT_CREDENTIALS) {
+      try {
+        botCredentials = parseBotCredentials(process.env.YOUTUBE_BOT_CREDENTIALS);
+      } catch (err) {
+        botProblem = err instanceof Error ? err.message : String(err);
+      }
+    }
+    const mc = await Masterchat.init(streamId.trim(), botCredentials ? { credentials: botCredentials } : {});
     setChatStatus(
-      botCredentials ? "" : "Song requests are on. No bot account is set, so the bot won't reply in chat."
+      botCredentials
+        ? ""
+        : botProblem
+          ? `Song requests are on, but YOUTUBE_BOT_CREDENTIALS isn't right (${botProblem}), so the bot won't reply in chat.`
+          : "Song requests are on. No bot account is set, so the bot won't reply in chat."
     );
 
     function sendMessage(content: string) {
